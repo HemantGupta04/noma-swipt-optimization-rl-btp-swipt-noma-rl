@@ -12,28 +12,28 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from scipy.special import kv
+from scipy.special import kve
 
 
 # ===================== System Parameters =====================
-K = 5
-M = 2
+K = 3
+M = 3
 LAMBDA = 1.0
-K_ORDER = 3
-USER_ORDERS = (1, 2)  # near, far
+SELECTED_RELAY_ORDER = 2
+SELECTED_USER_ORDER = 2
 BASELINE_RHO = 0.5
-BASELINE_DELTA = np.array([0.05, 0.10], dtype=float)
+BASELINE_DELTA = np.array([0.01, 0.10], dtype=float)
 BASELINE_SIGMA_N2 = 1.0
 BASELINE_ETA = 0.8
 
 EPS = np.finfo(float).eps
 OUTPUT_DIR = Path(__file__).resolve().parent
 
-AK = math.factorial(K) / (math.factorial(K_ORDER - 1) * math.factorial(K - K_ORDER))
-AM_VALUES = tuple(
-    math.factorial(M)
-    / (math.factorial(order - 1) * math.factorial(M - order))
-    for order in USER_ORDERS
+AK = math.factorial(K) / (
+    math.factorial(SELECTED_RELAY_ORDER - 1) * math.factorial(K - SELECTED_RELAY_ORDER)
+)
+AM = math.factorial(M) / (
+    math.factorial(SELECTED_USER_ORDER - 1) * math.factorial(M - SELECTED_USER_ORDER)
 )
 
 
@@ -75,7 +75,11 @@ class State:
 
 
 def clip_open_interval(value, low, high):
-    return float(np.clip(value, low + 1e-6, high - 1e-6))
+    low_open = np.nextafter(low, high)
+    high_open = np.nextafter(high, low)
+    if not low_open < high_open:
+        return float((low + high) / 2.0)
+    return float(np.clip(value, low_open, high_open))
 
 
 def sample_from_edges(rng, edges, weights=None):
@@ -85,14 +89,37 @@ def sample_from_edges(rng, edges, weights=None):
     return clip_open_interval(rng.uniform(low, high), low, high)
 
 
+def sample_delta_above(rng, lower_bound):
+    conditional_weights = np.zeros(len(DELTA_EDGES) - 1, dtype=float)
+
+    for bin_index, base_weight in enumerate(DELTA_BIN_WEIGHTS):
+        bin_low = DELTA_EDGES[bin_index]
+        bin_high = DELTA_EDGES[bin_index + 1]
+        valid_low = max(bin_low, lower_bound)
+        valid_length = max(bin_high - valid_low, 0.0)
+        bin_width = bin_high - bin_low
+        conditional_weights[bin_index] = base_weight * (valid_length / bin_width)
+
+    weight_sum = conditional_weights.sum()
+    if weight_sum <= 0.0:
+        raise ValueError(f"No feasible Delta_far value exists above Delta_near={lower_bound}.")
+
+    conditional_weights /= weight_sum
+    bin_index = int(rng.choice(len(DELTA_EDGES) - 1, p=conditional_weights))
+    low = max(DELTA_EDGES[bin_index], lower_bound)
+    high = DELTA_EDGES[bin_index + 1]
+    return clip_open_interval(rng.uniform(low, high), low, high)
+
+
 def sample_state(rng):
+    delta_near = sample_from_edges(rng, DELTA_EDGES, DELTA_BIN_WEIGHTS)
+    # Enforce the system assumption that the far user experiences larger
+    # residual SIC error than the near user.
+    delta_far = sample_delta_above(rng, delta_near)
     return State(
         snr_db=sample_from_edges(rng, SNR_EDGES),
         delta=np.array(
-            [
-                sample_from_edges(rng, DELTA_EDGES, DELTA_BIN_WEIGHTS),
-                sample_from_edges(rng, DELTA_EDGES, DELTA_BIN_WEIGHTS),
-            ],
+            [delta_near, delta_far],
             dtype=float,
         ),
         sigma_n2=sample_from_edges(rng, SIGMA_EDGES),
@@ -118,42 +145,45 @@ def compute_user_pep(snr_db, delta_u, sigma_n2, eta, rho, user_index):
     pb = snr_linear * sigma_n2
     pr = eta * rho * LAMBDA * pb
 
+    # The updated closed form uses the same combinatorial orders for both users;
+    # the user-specific dependence enters through delta_u only.
+    _ = user_index
+
     g_fixed = np.sqrt(pr / ((1.0 - rho) * LAMBDA * pb + (2.0 - rho) * sigma_n2 + EPS))
     g_fixed_prime = g_fixed * np.sqrt(1.0 - rho)
     g_relay = np.sqrt(g_fixed**2 + g_fixed_prime**2)
-
-    zeta = max(g_relay * np.sqrt(pb) * (delta_u**2), EPS)
+    signal_term = g_fixed**2 * (1.0 - rho) * pb
+    interference_term = g_fixed**2 * sigma_n2 + g_relay**2 * pb * (delta_u**2)
 
     sum_total = 0.0
-    m_order = USER_ORDERS[user_index]
-    am = AM_VALUES[user_index]
 
-    for ell in range(K_ORDER):
-        for ii in range(m_order):
-            k_prime = K - K_ORDER + ell + 1
-            m_prime = M - m_order + ii + 1
+    for ell in range(SELECTED_RELAY_ORDER):
+        for ii in range(SELECTED_USER_ORDER):
+            k_prime = K - SELECTED_RELAY_ORDER + ell + 1
+            m_prime = M - SELECTED_USER_ORDER + ii + 1
 
             uk = np.sqrt(
                 1.0
-                + (4.0 * m_prime * sigma_n2 * (delta_u**2) * g_relay**2)
-                / (LAMBDA * zeta**2 + EPS)
+                + (4.0 * m_prime * interference_term) / (LAMBDA * signal_term + EPS)
             )
-            ak = max(k_prime * (1.0 - 1.0 / (uk**2)) / (2.0 * LAMBDA * g_relay**2 + EPS), EPS)
+            ak = k_prime * (1.0 - 1.0 / (uk**2)) / (2.0 * LAMBDA * signal_term + EPS)
+
+            if ak <= 0.0:
+                continue
 
             term = (
-                math.comb(K_ORDER - 1, ell)
+                math.comb(SELECTED_RELAY_ORDER - 1, ell)
                 * ((-1) ** ell)
-                * math.comb(m_order - 1, ii)
+                * math.comb(SELECTED_USER_ORDER - 1, ii)
                 * ((-1) ** ii)
                 * (ak / (k_prime * m_prime * uk + EPS))
-                * np.exp(ak)
-                * (kv(1, ak) - kv(0, ak))
+                * (kve(1, ak) - kve(0, ak))
             )
 
             if np.isfinite(term):
                 sum_total += term
 
-    pep_value = 0.5 - (AK * am / 2.0) * sum_total
+    pep_value = 0.5 - (AK * AM / 2.0) * sum_total
     return float(np.clip(np.real_if_close(pep_value), 1e-8, 1.0))
 
 

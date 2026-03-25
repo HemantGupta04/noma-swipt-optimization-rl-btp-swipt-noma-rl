@@ -37,14 +37,14 @@ Here are the environment variables defining the NOMA-SWIPT channel and the range
 
 | Parameter | Type | Base Value | Grid / Range | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `K` | Int | `5` | - | Total number of relays available. |
-| `M` | Int | `2` | - | Total number of users receiving the superposition coded signal. |
-| `K_ORDER` | Int | `3` | - | Target index for the partially selected relay. |
-| `USER_ORDERS` | Tuple | `(1, 2)` | - | Indices representing the near (1) and far (2) users. |
+| `K` | Int | `3` | - | Total number of relays available. |
+| `M` | Int | `3` | - | Total number of users used in the updated closed-form PEP model. |
+| `SELECTED_RELAY_ORDER` | Int | `2` | - | Relay order used in the updated PEP expression. |
+| `SELECTED_USER_ORDER` | Int | `2` | - | User order used in the updated PEP expression. |
 | `LAMBDA` | Float | `1.0` | - | Path loss / structural environmental scale factor. |
 | `BASELINE_RHO` | Float | `0.5` | - | The constant, unoptimized power-splitting ratio baseline. |
 | `SNR_DB` | Float | `20.0 dB` | `[0.0, 40.0]` | Signal-to-Noise Ratio at the source transmitter. |
-| `DELTA` ($\delta$) | Array | `[0.05, 0.10]` | `[0.0, 1.0]` | The distances/channel variances for the near and far users. |
+| `DELTA` ($\delta$) | Array | `[0.01, 0.10]` | `[0.0, 1.0]` | Residual SIC error values for the near and far users. Random training samples enforce `Delta_far > Delta_near`. |
 | `SIGMA_N2` ($\sigma_n^2$) | Float | `1.0` | `[0.5, 1.0]` | Additive White Gaussian Noise (AWGN) variance. |
 | `ETA` ($\eta$) | Float | `0.8` | `[0.6, 1.0]` | Energy conversion efficiency of the SWIPT relay harvesters. |
 
