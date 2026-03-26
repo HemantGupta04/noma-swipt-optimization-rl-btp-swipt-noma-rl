@@ -1,0 +1,5 @@
+# External Python dependencies used by the project
+numpy
+scipy
+matplotlib
+torch
